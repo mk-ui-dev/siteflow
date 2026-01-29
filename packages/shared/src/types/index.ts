@@ -4,5 +4,7 @@ export * from './project.types';
 export * from './task.types';
 export * from './inspection.types';
 export * from './issue.types';
+export * from './delivery.types';
+export * from './decision.types';
 export * from './error.types';
 export * from './permissions';

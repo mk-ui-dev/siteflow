@@ -1,47 +1,43 @@
-/**
- * Delivery Types
- * Material and equipment delivery management
- */
+export enum DeliveryStatus {
+  REQUESTED = 'REQUESTED',
+  SCHEDULED = 'SCHEDULED',
+  IN_TRANSIT = 'IN_TRANSIT',
+  DELIVERED = 'DELIVERED',
+  CONFIRMED = 'CONFIRMED',
+}
 
-import type { DeliveryStatus } from '../enums';
-import type { BaseEntity, UserTracked } from './common.types';
-
-/**
- * Delivery
- * DB: deliveries table
- */
-export interface Delivery extends BaseEntity, UserTracked {
+export interface Delivery {
+  id: string;
   projectId: string;
-  taskId: string | null;
-  locationId: string | null;
-  supplierName: string;
+  supplier: string;
   status: DeliveryStatus;
-  statusReason: string | null;
-  blocksWork: boolean; // INV-8: If true + status < DELIVERED → creates task_blocks
-  expectedDate: Date | null;
-  deliveredAt: Date | null;
-}
-
-/**
- * Delivery Item
- * DB: delivery_items table
- */
-export interface DeliveryItem extends BaseEntity {
-  deliveryId: string;
-  itemName: string;
-  quantityOrdered: number;
-  quantityDelivered: number | null;
-  unit: string;
-  isDamaged: boolean;
-  notes: string | null;
-}
-
-/**
- * Delivery with items (enriched)
- */
-export interface DeliveryWithItems extends Delivery {
+  
+  // Dates
+  expectedDeliveryDate: Date;
+  actualDeliveryDate?: Date;
+  
+  // Confirmation
+  confirmedAt?: Date;
+  confirmedBy?: string;
+  confirmNotes?: string;
+  
+  // Notes
+  notes?: string;
+  
+  // Audit
+  requestedBy: string;
+  createdAt: Date;
+  deletedAt?: Date;
+  
+  // Relations
   items: DeliveryItem[];
-  totalItems: number;
-  totalReceived: number;
-  totalDamaged: number;
+}
+
+export interface DeliveryItem {
+  id: string;
+  deliveryId: string;
+  description: string;
+  quantity: number;
+  unit: string;
+  createdAt: Date;
 }

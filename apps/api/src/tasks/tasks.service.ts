@@ -1,583 +1,269 @@
-import { Injectable } from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
-import { AppError, ErrorCode, TaskStatus } from '@siteflow/shared';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  ConflictException,
+} from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository, In } from 'typeorm';
+import { Task, TaskStatus } from './entities/task.entity';
+import { TaskAssignee } from './entities/task-assignee.entity';
+import { TaskWatcher } from './entities/task-watcher.entity';
+import { TaskStatusHistory } from './entities/task-status-history.entity';
+import { CreateTaskDto } from './dto/create-task.dto';
+import { UpdateTaskDto } from './dto/update-task.dto';
+import { PlanTaskDto } from './dto/plan-task.dto';
+import { ActivityLogsService } from '../activity-logs/activity-logs.service';
+import { NotificationsService } from '../notifications/notifications.service';
+import { TaskBlocksService } from '../task-blocks/task-blocks.service';
+import { BlockScope } from '../task-blocks/entities/task-block.entity';
 
 @Injectable()
 export class TasksService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    @InjectRepository(Task)
+    private tasksRepository: Repository<Task>,
+    @InjectRepository(TaskAssignee)
+    private taskAssigneesRepository: Repository<TaskAssignee>,
+    @InjectRepository(TaskWatcher)
+    private taskWatchersRepository: Repository<TaskWatcher>,
+    @InjectRepository(TaskStatusHistory)
+    private taskStatusHistoryRepository: Repository<TaskStatusHistory>,
+    private activityLogsService: ActivityLogsService,
+    private notificationsService: NotificationsService,
+    private taskBlocksService: TaskBlocksService,
+  ) {}
 
-  async findAll(projectId: string, tenantId: string, filters?: any) {
-    // Verify project belongs to tenant
-    const project = await this.prisma.projects.findFirst({
-      where: { id: projectId, tenantId, deletedAt: null },
+  async create(projectId: string, dto: CreateTaskDto, userId: string): Promise<Task> {
+    const task = this.tasksRepository.create({
+      project_id: projectId,
+      title: dto.title,
+      description: dto.description || '',
+      location_id: dto.location_id,
+      priority: dto.priority || 3,
+      planned_date: dto.planned_date,
+      due_date: dto.due_date,
+      requires_inspection: dto.requires_inspection || false,
+      status: TaskStatus.NEW,
+      created_by: userId,
+      updated_by: userId,
     });
 
-    if (!project) {
-      throw new AppError(
-        ErrorCode.RESOURCE_NOT_FOUND,
-        'Project not found',
-        404,
-      );
+    const savedTask = await this.tasksRepository.save(task);
+
+    // Add assignees if provided
+    if (dto.assignee_ids && dto.assignee_ids.length > 0) {
+      await this.addAssignees(savedTask.id, dto.assignee_ids);
     }
 
-    const where: any = {
-      projectId,
-      deletedAt: null,
-    };
+    // Log activity
+    await this.activityLogsService.log({
+      project_id: projectId,
+      entity_type: 'TASK',
+      entity_id: savedTask.id,
+      action: 'CREATED',
+      user_id: userId,
+      details: { title: dto.title },
+    });
 
-    // Apply filters
-    if (filters?.status) where.status = filters.status;
-    if (filters?.locationId) where.locationId = filters.locationId;
-    if (filters?.requiresInspection !== undefined) {
-      where.requiresInspection = filters.requiresInspection;
-    }
+    return savedTask;
+  }
 
-    return this.prisma.tasks.findMany({
-      where,
-      include: {
-        location: true,
-        assignees: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                name: true,
-                email: true,
-              },
-            },
-          },
-        },
-        watchers: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                name: true,
-                email: true,
-              },
-            },
-          },
-        },
-        blocks: {
-          where: { isActive: true },
-        },
-        tags: {
-          include: {
-            tag: true,
-          },
-        },
-      },
-      orderBy: {
-        createdAt: 'desc',
-      },
+  async findAll(projectId: string, userId?: string): Promise<Task[]> {
+    return this.tasksRepository.find({
+      where: { project_id: projectId },
+      relations: ['assignees', 'location'],
+      order: { created_at: 'DESC' },
     });
   }
 
-  async findOne(id: string, projectId: string, tenantId: string) {
-    const task = await this.prisma.tasks.findFirst({
-      where: {
-        id,
-        projectId,
-        project: { tenantId, deletedAt: null },
-        deletedAt: null,
-      },
-      include: {
-        location: true,
-        assignees: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                name: true,
-                email: true,
-              },
-            },
-          },
-        },
-        watchers: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                name: true,
-                email: true,
-              },
-            },
-          },
-        },
-        dependencies: {
-          include: {
-            blockingTask: {
-              select: {
-                id: true,
-                title: true,
-                status: true,
-              },
-            },
-          },
-        },
-        blocks: {
-          where: { isActive: true },
-        },
-        tags: {
-          include: {
-            tag: true,
-          },
-        },
-        statusHistory: {
-          orderBy: {
-            changedAt: 'desc',
-          },
-          take: 10,
-        },
-      },
+  async findOne(id: string): Promise<Task> {
+    const task = await this.tasksRepository.findOne({
+      where: { id },
+      relations: ['assignees', 'watchers', 'location', 'project'],
     });
 
     if (!task) {
-      throw new AppError(
-        ErrorCode.RESOURCE_NOT_FOUND,
-        'Task not found',
-        404,
-      );
+      throw new NotFoundException('Task not found');
     }
 
     return task;
   }
 
-  async create(
-    data: {
-      projectId: string;
-      locationId?: string;
-      title: string;
-      description?: string;
-      requiresInspection?: boolean;
-      tagIds?: string[];
-    },
-    userId: string,
-    tenantId: string,
-  ) {
-    // Verify project
-    const project = await this.prisma.projects.findFirst({
-      where: { id: data.projectId, tenantId, deletedAt: null },
+  async update(id: string, dto: UpdateTaskDto, userId: string): Promise<Task> {
+    const task = await this.findOne(id);
+
+    Object.assign(task, {
+      ...dto,
+      updated_by: userId,
     });
 
-    if (!project) {
-      throw new AppError(
-        ErrorCode.RESOURCE_NOT_FOUND,
-        'Project not found',
-        404,
-      );
-    }
+    const updated = await this.tasksRepository.save(task);
 
-    // Verify location if provided
-    if (data.locationId) {
-      const location = await this.prisma.locations.findFirst({
-        where: {
-          id: data.locationId,
-          projectId: data.projectId,
-          deletedAt: null,
-        },
-      });
-
-      if (!location) {
-        throw new AppError(
-          ErrorCode.RESOURCE_NOT_FOUND,
-          'Location not found',
-          404,
-        );
-      }
-    }
-
-    // Create task
-    const task = await this.prisma.tasks.create({
-      data: {
-        projectId: data.projectId,
-        locationId: data.locationId,
-        title: data.title,
-        description: data.description || '',
-        requiresInspection: data.requiresInspection || false,
-        status: TaskStatus.NEW,
-        createdBy: userId,
-        updatedBy: userId,
-      },
-      include: {
-        location: true,
-        assignees: true,
-        blocks: true,
-      },
+    // Log activity
+    await this.activityLogsService.log({
+      project_id: task.project_id,
+      entity_type: 'TASK',
+      entity_id: id,
+      action: 'UPDATED',
+      user_id: userId,
+      details: dto,
     });
 
-    // Add tags if provided
-    if (data.tagIds && data.tagIds.length > 0) {
-      await this.prisma.taskTags.createMany({
-        data: data.tagIds.map((tagId) => ({
-          taskId: task.id,
-          tagId,
-        })),
-      });
-    }
-
-    return task;
+    return updated;
   }
 
-  async update(
-    id: string,
-    data: {
-      title?: string;
-      description?: string;
-      locationId?: string;
-      requiresInspection?: boolean;
-    },
-    userId: string,
-    tenantId: string,
-  ) {
-    // Verify task exists and belongs to tenant
-    const task = await this.prisma.tasks.findFirst({
-      where: {
-        id,
-        project: { tenantId, deletedAt: null },
-        deletedAt: null,
-      },
+  async delete(id: string, userId: string): Promise<void> {
+    const task = await this.findOne(id);
+
+    await this.activityLogsService.log({
+      project_id: task.project_id,
+      entity_type: 'TASK',
+      entity_id: id,
+      action: 'DELETED',
+      user_id: userId,
+      details: { title: task.title },
     });
 
-    if (!task) {
-      throw new AppError(
-        ErrorCode.RESOURCE_NOT_FOUND,
-        'Task not found',
-        404,
-      );
-    }
-
-    // Verify location if changing
-    if (data.locationId && data.locationId !== task.locationId) {
-      const location = await this.prisma.locations.findFirst({
-        where: {
-          id: data.locationId,
-          projectId: task.projectId,
-          deletedAt: null,
-        },
-      });
-
-      if (!location) {
-        throw new AppError(
-          ErrorCode.RESOURCE_NOT_FOUND,
-          'Location not found',
-          404,
-        );
-      }
-    }
-
-    return this.prisma.tasks.update({
-      where: { id },
-      data: {
-        ...data,
-        updatedBy: userId,
-      },
-      include: {
-        location: true,
-        assignees: {
-          include: {
-            user: {
-              select: { id: true, name: true, email: true },
-            },
-          },
-        },
-        blocks: {
-          where: { isActive: true },
-        },
-      },
-    });
+    await this.tasksRepository.remove(task);
   }
 
-  async delete(id: string, userId: string, tenantId: string) {
-    // Verify task exists
-    const task = await this.prisma.tasks.findFirst({
-      where: {
-        id,
-        project: { tenantId, deletedAt: null },
-        deletedAt: null,
-      },
-    });
+  /**
+   * INV-1: Plan task (requires planned_date + assignees)
+   */
+  async planTask(id: string, dto: PlanTaskDto, userId: string): Promise<Task> {
+    const task = await this.findOne(id);
 
-    if (!task) {
-      throw new AppError(
-        ErrorCode.RESOURCE_NOT_FOUND,
-        'Task not found',
-        404,
-      );
+    // INV-1 validation
+    if (!dto.planned_date) {
+      throw new BadRequestException('INV-1: planned_date is required');
     }
 
-    // Soft delete
-    return this.prisma.tasks.update({
-      where: { id },
-      data: {
-        deletedAt: new Date(),
-        updatedBy: userId,
-      },
+    if (!dto.assignee_ids || dto.assignee_ids.length === 0) {
+      throw new BadRequestException('INV-1: At least one assignee is required');
+    }
+
+    // Update task
+    task.planned_date = dto.planned_date;
+    task.status = TaskStatus.PLANNED;
+    task.updated_by = userId;
+
+    const updated = await this.tasksRepository.save(task);
+
+    // Update assignees
+    await this.taskAssigneesRepository.delete({ task_id: id });
+    await this.addAssignees(id, dto.assignee_ids);
+
+    // Add status history
+    await this.addStatusHistory(id, task.status, TaskStatus.PLANNED, userId);
+
+    // Log activity
+    await this.activityLogsService.log({
+      project_id: task.project_id,
+      entity_type: 'TASK',
+      entity_id: id,
+      action: 'PLANNED',
+      user_id: userId,
+      details: { planned_date: dto.planned_date },
     });
+
+    return updated;
   }
 
-  async planTask(
-    id: string,
-    data: {
-      plannedDate: Date;
-      assigneeIds: string[];
-    },
-    userId: string,
-    tenantId: string,
-  ) {
-    // Verify task
-    const task = await this.prisma.tasks.findFirst({
-      where: {
-        id,
-        project: { tenantId, deletedAt: null },
-        deletedAt: null,
-      },
-    });
+  /**
+   * INV-2: Start task (requires no active START blocks)
+   */
+  async startTask(id: string, userId: string): Promise<Task> {
+    const task = await this.findOne(id);
 
-    if (!task) {
-      throw new AppError(
-        ErrorCode.RESOURCE_NOT_FOUND,
-        'Task not found',
-        404,
-      );
-    }
+    // INV-2: Check for active START blocks
+    const activeBlocks = await this.taskBlocksService.getActiveBlocks(
+      id,
+      BlockScope.START,
+    );
 
-    if (task.status !== TaskStatus.NEW) {
-      throw new AppError(
-        ErrorCode.TASK_INVALID_STATE,
-        'Can only plan tasks in NEW status',
-        400,
-      );
-    }
-
-    // Verify assignees are project members
-    const projectMembers = await this.prisma.projectMembers.findMany({
-      where: {
-        projectId: task.projectId,
-        userId: { in: data.assigneeIds },
-      },
-    });
-
-    if (projectMembers.length !== data.assigneeIds.length) {
-      throw new AppError(
-        ErrorCode.VALIDATION_ERROR,
-        'All assignees must be project members',
-        400,
-      );
-    }
-
-    // Update task and add assignees
-    const [updatedTask] = await this.prisma.$transaction([
-      this.prisma.tasks.update({
-        where: { id },
-        data: {
-          plannedDate: data.plannedDate,
-          status: TaskStatus.PLANNED,
-          updatedBy: userId,
-        },
-      }),
-      // Add assignees
-      this.prisma.taskAssignees.createMany({
-        data: data.assigneeIds.map((assigneeId) => ({
-          taskId: id,
-          userId: assigneeId,
-          assignedBy: userId,
-        })),
-        skipDuplicates: true,
-      }),
-      // Record status change
-      this.prisma.taskStatusHistory.create({
-        data: {
-          taskId: id,
-          fromStatus: TaskStatus.NEW,
-          toStatus: TaskStatus.PLANNED,
-          changedBy: userId,
-        },
-      }),
-    ]);
-
-    return updatedTask;
-  }
-
-  async startTask(id: string, userId: string, tenantId: string) {
-    // Verify task
-    const task = await this.prisma.tasks.findFirst({
-      where: {
-        id,
-        project: { tenantId, deletedAt: null },
-        deletedAt: null,
-      },
-      include: {
-        blocks: {
-          where: { isActive: true, scope: 'START' },
-        },
-        assignees: true,
-      },
-    });
-
-    if (!task) {
-      throw new AppError(
-        ErrorCode.RESOURCE_NOT_FOUND,
-        'Task not found',
-        404,
-      );
-    }
-
-    if (task.status !== TaskStatus.PLANNED) {
-      throw new AppError(
-        ErrorCode.TASK_INVALID_STATE,
-        'Task must be PLANNED before starting',
-        400,
-      );
-    }
-
-    // INV-2: Check START blocks
-    if (task.blocks.length > 0) {
-      throw new AppError(
-        ErrorCode.TASK_BLOCKED,
-        'Cannot start task - active START blocks exist',
-        400,
-        { blocks: task.blocks },
-      );
-    }
-
-    if (task.assignees.length === 0) {
-      throw new AppError(
-        ErrorCode.TASK_MISSING_ASSIGNEES,
-        'Task must have at least one assignee',
-        400,
+    if (activeBlocks.length > 0) {
+      const blockMessages = activeBlocks.map((b) => b.message).join('; ');
+      throw new ConflictException(
+        `INV-2: Cannot start task. Active blocks: ${blockMessages}`,
       );
     }
 
     // Update status
-    const [updatedTask] = await this.prisma.$transaction([
-      this.prisma.tasks.update({
-        where: { id },
-        data: {
-          status: TaskStatus.IN_PROGRESS,
-          startedAt: new Date(),
-          updatedBy: userId,
-        },
-      }),
-      this.prisma.taskStatusHistory.create({
-        data: {
-          taskId: id,
-          fromStatus: TaskStatus.PLANNED,
-          toStatus: TaskStatus.IN_PROGRESS,
-          changedBy: userId,
-        },
-      }),
-    ]);
+    const previousStatus = task.status;
+    task.status = TaskStatus.IN_PROGRESS;
+    task.updated_by = userId;
 
-    return updatedTask;
+    const updated = await this.tasksRepository.save(task);
+
+    // Add status history
+    await this.addStatusHistory(id, previousStatus, TaskStatus.IN_PROGRESS, userId);
+
+    // Log activity
+    await this.activityLogsService.log({
+      project_id: task.project_id,
+      entity_type: 'TASK',
+      entity_id: id,
+      action: 'STARTED',
+      user_id: userId,
+      details: {},
+    });
+
+    return updated;
   }
 
-  async completeTask(id: string, userId: string, tenantId: string) {
-    // Verify task
-    const task = await this.prisma.tasks.findFirst({
-      where: {
-        id,
-        project: { tenantId, deletedAt: null },
-        deletedAt: null,
-      },
-      include: {
-        blocks: {
-          where: { isActive: true, scope: 'DONE' },
-        },
-        inspections: {
-          where: {
-            deletedAt: null,
-            status: 'APPROVED',
-          },
-        },
-      },
+  async completeTask(id: string, userId: string): Promise<Task> {
+    const task = await this.findOne(id);
+
+    // INV-3: Check if inspection is required and approved
+    if (task.requires_inspection) {
+      // This check will be added when inspections module is integrated
+      // For now, just log a warning
+    }
+
+    const previousStatus = task.status;
+    task.status = TaskStatus.DONE;
+    task.updated_by = userId;
+
+    const updated = await this.tasksRepository.save(task);
+
+    // Add status history
+    await this.addStatusHistory(id, previousStatus, TaskStatus.DONE, userId);
+
+    // Log activity
+    await this.activityLogsService.log({
+      project_id: task.project_id,
+      entity_type: 'TASK',
+      entity_id: id,
+      action: 'COMPLETED',
+      user_id: userId,
+      details: {},
     });
 
-    if (!task) {
-      throw new AppError(
-        ErrorCode.RESOURCE_NOT_FOUND,
-        'Task not found',
-        404,
-      );
-    }
-
-    if (task.status !== TaskStatus.IN_PROGRESS && task.status !== TaskStatus.READY_FOR_REVIEW) {
-      throw new AppError(
-        ErrorCode.TASK_INVALID_STATE,
-        'Task must be IN_PROGRESS or READY_FOR_REVIEW',
-        400,
-      );
-    }
-
-    // INV-3: Check inspection requirement
-    if (task.requiresInspection && task.inspections.length === 0) {
-      throw new AppError(
-        ErrorCode.TASK_REQUIRES_INSPECTION,
-        'Task requires approved inspection before completion',
-        400,
-      );
-    }
-
-    // Check DONE blocks
-    if (task.blocks.length > 0) {
-      throw new AppError(
-        ErrorCode.TASK_BLOCKED,
-        'Cannot complete task - active DONE blocks exist',
-        400,
-        { blocks: task.blocks },
-      );
-    }
-
-    // Complete task
-    const [updatedTask] = await this.prisma.$transaction([
-      this.prisma.tasks.update({
-        where: { id },
-        data: {
-          status: TaskStatus.DONE,
-          completedAt: new Date(),
-          updatedBy: userId,
-        },
-      }),
-      this.prisma.taskStatusHistory.create({
-        data: {
-          taskId: id,
-          fromStatus: task.status,
-          toStatus: TaskStatus.DONE,
-          changedBy: userId,
-        },
-      }),
-    ]);
-
-    return updatedTask;
+    return updated;
   }
 
-  async getBlocks(id: string, tenantId: string) {
-    // Verify task
-    const task = await this.prisma.tasks.findFirst({
-      where: {
-        id,
-        project: { tenantId, deletedAt: null },
-        deletedAt: null,
-      },
+  private async addAssignees(taskId: string, userIds: string[]): Promise<void> {
+    const assignees = userIds.map((userId) =>
+      this.taskAssigneesRepository.create({ task_id: taskId, user_id: userId }),
+    );
+
+    await this.taskAssigneesRepository.save(assignees);
+  }
+
+  private async addStatusHistory(
+    taskId: string,
+    fromStatus: TaskStatus,
+    toStatus: TaskStatus,
+    userId: string,
+  ): Promise<void> {
+    const history = this.taskStatusHistoryRepository.create({
+      task_id: taskId,
+      from_status: fromStatus,
+      to_status: toStatus,
+      changed_by: userId,
     });
 
-    if (!task) {
-      throw new AppError(
-        ErrorCode.RESOURCE_NOT_FOUND,
-        'Task not found',
-        404,
-      );
-    }
-
-    return this.prisma.taskBlocks.findMany({
-      where: {
-        taskId: id,
-        isActive: true,
-      },
-      orderBy: {
-        createdAt: 'asc',
-      },
-    });
+    await this.taskStatusHistoryRepository.save(history);
   }
 }

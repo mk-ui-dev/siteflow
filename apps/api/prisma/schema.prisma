@@ -1,0 +1,391 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ==========================================
+// ENUMS
+// ==========================================
+
+enum ProjectRole {
+  INVESTOR
+  INSPECTOR
+  GC
+  SUB
+  PROCUREMENT
+}
+
+enum TaskStatus {
+  NEW
+  PLANNED
+  IN_PROGRESS
+  READY_FOR_REVIEW
+  DONE
+  CANCELLED
+}
+
+enum InspectionStatus {
+  DRAFT
+  SUBMITTED
+  IN_REVIEW
+  APPROVED
+  REJECTED
+}
+
+enum IssueStatus {
+  OPEN
+  ASSIGNED
+  FIXED
+  VERIFIED
+  CLOSED
+}
+
+enum DeliveryStatus {
+  REQUESTED
+  ORDERED
+  IN_TRANSIT
+  DELIVERED
+  ACCEPTED
+  REJECTED
+}
+
+enum DecisionStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+  IMPLEMENTED
+}
+
+enum EntityType {
+  TASK
+  INSPECTION
+  ISSUE
+  DELIVERY
+  DECISION
+  LOCATION
+  COMMENT
+  FILE
+  PROJECT
+}
+
+enum ChecklistItemType {
+  BOOL
+  TEXT
+  NUMBER
+  SELECT
+  PHOTO
+}
+
+enum NotificationChannel {
+  IN_APP
+  EMAIL
+}
+
+enum NotificationStatus {
+  QUEUED
+  SENT
+  FAILED
+  CANCELED
+}
+
+enum OutboxStatus {
+  NEW
+  PROCESSING
+  DONE
+  FAILED
+}
+
+enum MembershipStatus {
+  ACTIVE
+  INVITED
+  SUSPENDED
+}
+
+enum InviteStatus {
+  PENDING
+  ACCEPTED
+  EXPIRED
+  REVOKED
+}
+
+// ==========================================
+// MODELS (Tables 1-47)
+// ==========================================
+
+// Table 1
+model InstanceSettings {
+  id                Int      @id @default(1)
+  publicJson        Json     @map("public_json")
+  secretsEncrypted  Bytes    @map("secrets_encrypted")
+  secretsKeyId      String   @map("secrets_key_id")
+  updatedAt         DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@map("instance_settings")
+}
+
+// Table 2
+model Tenants {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  users              Users[]
+  projects           Projects[]
+  tags               Tags[]
+  checklistTemplates ChecklistTemplates[]
+  tenantRoles        TenantRoles[]
+  invites            Invites[]
+
+  @@map("tenants")
+}
+
+// Table 3
+model Users {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String    @map("tenant_id") @db.Uuid
+  email        String
+  name         String
+  passwordHash String    @map("password_hash")
+  isActive     Boolean   @default(true) @map("is_active")
+  lastLoginAt  DateTime? @map("last_login_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @default(now()) @updatedAt @map("updated_at")
+  deletedAt    DateTime? @map("deleted_at")
+
+  tenant       Tenants         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  refreshTokens RefreshTokens[]
+  // Add other relations as needed
+
+  @@unique([tenantId, email])
+  @@map("users")
+}
+
+// Table 10
+model RefreshTokens {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  tokenHash String    @map("token_hash")
+  expiresAt DateTime  @map("expires_at")
+  revokedAt DateTime? @map("revoked_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  user Users @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tokenHash])
+  @@map("refresh_tokens")
+}
+
+// Table 5
+model Permissions {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code        String   @unique
+  description String
+  
+  tenantRolePermissions TenantRolePermissions[]
+
+  @@map("permissions")
+}
+
+// Table 6
+model TenantRoles {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String    @map("tenant_id") @db.Uuid
+  name        String
+  description String?
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  tenant      Tenants                 @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  permissions TenantRolePermissions[]
+  userRoles   UserTenantRoles[]
+
+  @@unique([tenantId, name])
+  @@map("tenant_roles")
+}
+
+// Table 7
+model TenantRolePermissions {
+  roleId       String @map("role_id") @db.Uuid
+  permissionId String @map("permission_id") @db.Uuid
+
+  role       TenantRoles @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permissions @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("tenant_role_permissions")
+}
+
+// Table 8
+model UserTenantRoles {
+  userId     String   @map("user_id") @db.Uuid
+  roleId     String   @map("role_id") @db.Uuid
+  assignedAt DateTime @default(now()) @map("assigned_at")
+
+  role TenantRoles @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+  @@map("user_tenant_roles")
+}
+
+// Table 9
+model Invites {
+  id         String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId   String        @map("tenant_id") @db.Uuid
+  email      String
+  role       ProjectRole
+  tokenHash  String        @map("token_hash")
+  expiresAt  DateTime      @map("expires_at")
+  acceptedAt DateTime?     @map("accepted_at")
+  revokedAt  DateTime?     @map("revoked_at")
+  createdAt  DateTime      @default(now()) @map("created_at")
+  createdBy  String        @map("created_by") @db.Uuid
+
+  tenant Tenants @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("invites")
+}
+
+// Table 13
+model Projects {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String    @map("tenant_id") @db.Uuid
+  name        String
+  code        String
+  description String?
+  startDate   DateTime? @map("start_date") @db.Date
+  endDate     DateTime? @map("end_date") @db.Date
+  createdAt   DateTime  @default(now()) @map("created_at")
+  createdBy   String    @map("created_by") @db.Uuid
+  updatedAt   DateTime  @default(now()) @updatedAt @map("updated_at")
+  updatedBy   String    @map("updated_by") @db.Uuid
+  deletedAt   DateTime? @map("deleted_at")
+
+  tenant   Tenants          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  members  ProjectMembers[]
+  tasks    Tasks[]
+  locations Locations[]
+
+  @@unique([tenantId, name])
+  @@map("projects")
+}
+
+// Table 14
+model ProjectMembers {
+  projectId String      @map("project_id") @db.Uuid
+  userId    String      @map("user_id") @db.Uuid
+  role      ProjectRole
+  joinedAt  DateTime    @default(now()) @map("joined_at")
+
+  project Projects @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@id([projectId, userId])
+  @@map("project_members")
+}
+
+// Table 16
+model Locations {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId String    @map("project_id") @db.Uuid
+  parentId  String?   @map("parent_id") @db.Uuid
+  name      String
+  path      String
+  createdAt DateTime  @default(now()) @map("created_at")
+  createdBy String    @map("created_by") @db.Uuid
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at")
+  updatedBy String    @map("updated_by") @db.Uuid
+  deletedAt DateTime? @map("deleted_at")
+
+  project Projects @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  tasks   Tasks[]
+
+  @@unique([projectId, path])
+  @@map("locations")
+}
+
+// Table 17
+model Tasks {
+  id                  String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId           String      @map("project_id") @db.Uuid
+  locationId          String?     @map("location_id") @db.Uuid
+  title               String
+  description         String      @default("")
+  status              TaskStatus  @default(NEW)
+  plannedDate         DateTime?   @map("planned_date") @db.Date
+  startedAt           DateTime?   @map("started_at")
+  completedAt         DateTime?   @map("completed_at")
+  requiresInspection  Boolean     @default(false) @map("requires_inspection")
+  createdAt           DateTime    @default(now()) @map("created_at")
+  createdBy           String      @map("created_by") @db.Uuid
+  updatedAt           DateTime    @default(now()) @updatedAt @map("updated_at")
+  updatedBy           String      @map("updated_by") @db.Uuid
+  deletedAt           DateTime?   @map("deleted_at")
+
+  project   Projects       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  location  Locations?     @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  blocks    TaskBlocks[]
+
+  @@map("tasks")
+}
+
+// Table 21 - Task Blocks (SOURCE OF TRUTH)
+model TaskBlocks {
+  id            String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  taskId        String      @map("task_id") @db.Uuid
+  blockType     String      @map("block_type") // DELIVERY | DECISION | DEPENDENCY | MANUAL
+  scope         String      @default("START") // START | DONE
+  refEntityType EntityType? @map("ref_entity_type")
+  refEntityId   String?     @map("ref_entity_id") @db.Uuid
+  message       String
+  isActive      Boolean     @default(true) @map("is_active")
+  resolvedAt    DateTime?   @map("resolved_at")
+  resolvedBy    String?     @map("resolved_by") @db.Uuid
+  createdAt     DateTime    @default(now()) @map("created_at")
+  createdBy     String      @map("created_by") @db.Uuid
+
+  task Tasks @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@map("task_blocks")
+}
+
+// Table 23
+model Tags {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  name      String
+  color     String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  tenant Tenants @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, name])
+  @@map("tags")
+}
+
+// Table 25
+model ChecklistTemplates {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  name      String
+  discipline String
+  version   Int      @default(1)
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String   @map("created_by") @db.Uuid
+
+  tenant Tenants @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, name, version])
+  @@map("checklist_templates")
+}
+
+// Add remaining tables as needed...
+// (Tables 26-47 omitted for brevity - can be added incrementally)
+
+@@map("database_tables_comment")

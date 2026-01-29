@@ -1,582 +1,330 @@
-import { Injectable } from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
-import { AppError, ErrorCode, DecisionStatus } from '@siteflow/shared';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+} from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { Decision, DecisionStatus } from './entities/decision.entity';
+import { DecisionOption } from './entities/decision-option.entity';
+import { DecisionApproval } from './entities/decision-approval.entity';
+import { CreateDecisionDto } from './dto/create-decision.dto';
+import { UpdateDecisionDto } from './dto/update-decision.dto';
+import { CastApprovalDto } from './dto/cast-approval.dto';
+import { ActivityLogsService } from '../activity-logs/activity-logs.service';
+import { TaskBlocksService } from '../task-blocks/task-blocks.service';
+import { BlockType, BlockScope, EntityType } from '../task-blocks/entities/task-block.entity';
 
 @Injectable()
 export class DecisionsService {
-  constructor(private prisma: PrismaService) {}
-
-  async findAll(
-    tenantId: string,
-    filters?: {
-      projectId?: string;
-      status?: DecisionStatus;
-    },
-  ) {
-    const where: any = {
-      project: { tenantId, deletedAt: null },
-      deletedAt: null,
-    };
-
-    if (filters?.projectId) where.projectId = filters.projectId;
-    if (filters?.status) where.status = filters.status;
-
-    return this.prisma.decisions.findMany({
-      where,
-      include: {
-        project: {
-          select: {
-            id: true,
-            name: true,
-          },
-        },
-        options: true,
-        approvals: {
-          include: {
-            approver: {
-              select: {
-                id: true,
-                name: true,
-                email: true,
-              },
-            },
-          },
-        },
-      },
-      orderBy: {
-        createdAt: 'desc',
-      },
-    });
-  }
-
-  async findOne(id: string, tenantId: string) {
-    const decision = await this.prisma.decisions.findFirst({
-      where: {
-        id,
-        project: { tenantId, deletedAt: null },
-        deletedAt: null,
-      },
-      include: {
-        project: {
-          select: {
-            id: true,
-            name: true,
-          },
-        },
-        options: {
-          orderBy: {
-            order: 'asc',
-          },
-        },
-        approvals: {
-          include: {
-            approver: {
-              select: {
-                id: true,
-                name: true,
-                email: true,
-              },
-            },
-          },
-          orderBy: {
-            approvedAt: 'desc',
-          },
-        },
-        createdByUser: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
-          },
-        },
-        statusHistory: {
-          include: {
-            changedByUser: {
-              select: {
-                id: true,
-                name: true,
-                email: true,
-              },
-            },
-          },
-          orderBy: {
-            changedAt: 'desc',
-          },
-        },
-      },
-    });
-
-    if (!decision) {
-      throw new AppError(
-        ErrorCode.RESOURCE_NOT_FOUND,
-        'Decision not found',
-        404,
-      );
-    }
-
-    return decision;
-  }
+  constructor(
+    @InjectRepository(Decision)
+    private decisionsRepository: Repository<Decision>,
+    @InjectRepository(DecisionOption)
+    private decisionOptionsRepository: Repository<DecisionOption>,
+    @InjectRepository(DecisionApproval)
+    private decisionApprovalsRepository: Repository<DecisionApproval>,
+    private activityLogsService: ActivityLogsService,
+    private taskBlocksService: TaskBlocksService,
+  ) {}
 
   async create(
-    data: {
-      projectId: string;
-      title: string;
-      description: string;
-      requiredApprovers: number;
-      options?: Array<{
-        optionText: string;
-        order: number;
-      }>;
-    },
+    projectId: string,
+    dto: CreateDecisionDto,
     userId: string,
-    tenantId: string,
-  ) {
-    // Verify project
-    const project = await this.prisma.projects.findFirst({
-      where: {
-        id: data.projectId,
-        tenantId,
-        deletedAt: null,
-      },
+  ): Promise<Decision> {
+    const decision = this.decisionsRepository.create({
+      project_id: projectId,
+      subject: dto.subject,
+      problem: dto.problem,
+      related_type: dto.related_type,
+      related_id: dto.related_id,
+      blocks_work: dto.blocks_work || false,
+      decision_owner_id: dto.decision_owner_id,
+      due_date: dto.due_date,
+      status: DecisionStatus.DRAFT,
+      created_by: userId,
+      updated_by: userId,
     });
 
-    if (!project) {
-      throw new AppError(
-        ErrorCode.RESOURCE_NOT_FOUND,
-        'Project not found',
-        404,
+    const savedDecision = await this.decisionsRepository.save(decision);
+
+    // Create options
+    if (dto.options && dto.options.length > 0) {
+      const options = dto.options.map((opt) =>
+        this.decisionOptionsRepository.create({
+          decision_id: savedDecision.id,
+          option_text: opt.option_text,
+        }),
       );
+      await this.decisionOptionsRepository.save(options);
     }
 
-    // Create decision
-    const decision = await this.prisma.decisions.create({
-      data: {
-        projectId: data.projectId,
-        title: data.title,
-        description: data.description,
-        requiredApprovers: data.requiredApprovers,
-        status: DecisionStatus.PENDING,
-        createdBy: userId,
-        options: data.options
-          ? {
-              create: data.options,
-            }
-          : undefined,
-      },
-      include: {
-        options: true,
-      },
+    // Create approvals
+    if (dto.approver_ids && dto.approver_ids.length > 0) {
+      const approvals = dto.approver_ids.map((approverId) =>
+        this.decisionApprovalsRepository.create({
+          decision_id: savedDecision.id,
+          approver_id: approverId,
+        }),
+      );
+      await this.decisionApprovalsRepository.save(approvals);
+    }
+
+    await this.activityLogsService.log({
+      project_id: projectId,
+      entity_type: 'DECISION',
+      entity_id: savedDecision.id,
+      action: 'CREATED',
+      user_id: userId,
+      details: { subject: dto.subject },
     });
+
+    return savedDecision;
+  }
+
+  async findAll(projectId: string): Promise<Decision[]> {
+    return this.decisionsRepository.find({
+      where: { project_id: projectId },
+      relations: ['options', 'approvals', 'approvals.approver'],
+      order: { created_at: 'DESC' },
+    });
+  }
+
+  async findOne(id: string): Promise<Decision> {
+    const decision = await this.decisionsRepository.findOne({
+      where: { id },
+      relations: [
+        'options',
+        'approvals',
+        'approvals.approver',
+        'decision_owner',
+        'project',
+      ],
+    });
+
+    if (!decision) {
+      throw new NotFoundException('Decision not found');
+    }
 
     return decision;
   }
 
-  async update(
-    id: string,
-    data: {
-      title?: string;
-      description?: string;
-      requiredApprovers?: number;
-    },
-    tenantId: string,
-  ) {
-    // Verify decision
-    const decision = await this.prisma.decisions.findFirst({
-      where: {
+  /**
+   * INV-9: Submit for approval and create task block if blocks_work=true
+   */
+  async submitForApproval(id: string, userId: string): Promise<Decision> {
+    const decision = await this.findOne(id);
+
+    // Validation
+    if (!decision.decision_owner_id) {
+      throw new BadRequestException('Decision owner is required');
+    }
+
+    if (!decision.due_date) {
+      throw new BadRequestException('Due date is required');
+    }
+
+    const approvals = await this.decisionApprovalsRepository.find({
+      where: { decision_id: id },
+    });
+
+    if (approvals.length === 0) {
+      throw new BadRequestException('At least one approver is required');
+    }
+
+    const previousStatus = decision.status;
+    decision.status = DecisionStatus.PENDING_APPROVAL;
+    decision.updated_by = userId;
+
+    const updated = await this.decisionsRepository.save(decision);
+
+    // INV-9: Create task block if blocks_work=true and related_type=TASK
+    if (decision.blocks_work && decision.related_type === 'TASK') {
+      await this.taskBlocksService.ensureBlock(
+        decision.related_id,
+        BlockType.DECISION,
+        BlockScope.START,
+        EntityType.DECISION,
         id,
-        project: { tenantId, deletedAt: null },
-        deletedAt: null,
-      },
-    });
-
-    if (!decision) {
-      throw new AppError(
-        ErrorCode.RESOURCE_NOT_FOUND,
-        'Decision not found',
-        404,
+        `Waiting for decision: ${decision.subject}`,
+        userId,
       );
-    }
 
-    if (decision.status !== DecisionStatus.PENDING) {
-      throw new AppError(
-        ErrorCode.DECISION_INVALID_STATE,
-        'Can only update PENDING decisions',
-        400,
-      );
-    }
-
-    return this.prisma.decisions.update({
-      where: { id },
-      data,
-      include: {
-        options: true,
-      },
-    });
-  }
-
-  async addOption(
-    decisionId: string,
-    data: {
-      optionText: string;
-      order: number;
-    },
-    tenantId: string,
-  ) {
-    // Verify decision
-    const decision = await this.prisma.decisions.findFirst({
-      where: {
-        id: decisionId,
-        project: { tenantId, deletedAt: null },
-        deletedAt: null,
-      },
-    });
-
-    if (!decision) {
-      throw new AppError(
-        ErrorCode.RESOURCE_NOT_FOUND,
-        'Decision not found',
-        404,
-      );
-    }
-
-    if (decision.status !== DecisionStatus.PENDING) {
-      throw new AppError(
-        ErrorCode.DECISION_INVALID_STATE,
-        'Can only add options to PENDING decisions',
-        400,
-      );
-    }
-
-    return this.prisma.decisionOptions.create({
-      data: {
-        decisionId,
-        ...data,
-      },
-    });
-  }
-
-  async updateOption(
-    decisionId: string,
-    optionId: string,
-    data: {
-      optionText?: string;
-      order?: number;
-    },
-    tenantId: string,
-  ) {
-    // Verify decision and option
-    const decision = await this.prisma.decisions.findFirst({
-      where: {
-        id: decisionId,
-        project: { tenantId, deletedAt: null },
-        deletedAt: null,
-      },
-      include: {
-        options: {
-          where: { id: optionId },
-        },
-      },
-    });
-
-    if (!decision || decision.options.length === 0) {
-      throw new AppError(
-        ErrorCode.RESOURCE_NOT_FOUND,
-        'Decision or option not found',
-        404,
-      );
-    }
-
-    return this.prisma.decisionOptions.update({
-      where: { id: optionId },
-      data,
-    });
-  }
-
-  async deleteOption(
-    decisionId: string,
-    optionId: string,
-    tenantId: string,
-  ) {
-    // Verify decision and option
-    const decision = await this.prisma.decisions.findFirst({
-      where: {
-        id: decisionId,
-        project: { tenantId, deletedAt: null },
-        deletedAt: null,
-      },
-      include: {
-        options: {
-          where: { id: optionId },
-        },
-      },
-    });
-
-    if (!decision || decision.options.length === 0) {
-      throw new AppError(
-        ErrorCode.RESOURCE_NOT_FOUND,
-        'Decision or option not found',
-        404,
-      );
-    }
-
-    await this.prisma.decisionOptions.delete({
-      where: { id: optionId },
-    });
-
-    return { message: 'Option deleted' };
-  }
-
-  async approve(
-    id: string,
-    data: {
-      selectedOptionId?: string;
-      notes: string;
-    },
-    userId: string,
-    tenantId: string,
-  ) {
-    // Verify decision
-    const decision = await this.prisma.decisions.findFirst({
-      where: {
-        id,
-        project: { tenantId, deletedAt: null },
-        deletedAt: null,
-      },
-      include: {
-        approvals: true,
-        options: true,
-      },
-    });
-
-    if (!decision) {
-      throw new AppError(
-        ErrorCode.RESOURCE_NOT_FOUND,
-        'Decision not found',
-        404,
-      );
-    }
-
-    if (decision.status !== DecisionStatus.PENDING) {
-      throw new AppError(
-        ErrorCode.DECISION_INVALID_STATE,
-        'Can only approve PENDING decisions',
-        400,
-      );
-    }
-
-    // Check if user already approved
-    const existing = decision.approvals.find(
-      (a) => a.approverId === userId && a.isApproved,
-    );
-
-    if (existing) {
-      throw new AppError(
-        ErrorCode.DECISION_ALREADY_APPROVED,
-        'User has already approved this decision',
-        400,
-      );
-    }
-
-    // Verify selected option if provided
-    if (data.selectedOptionId) {
-      const option = decision.options.find(
-        (o) => o.id === data.selectedOptionId,
-      );
-      if (!option) {
-        throw new AppError(
-          ErrorCode.RESOURCE_NOT_FOUND,
-          'Selected option not found',
-          404,
-        );
-      }
-    }
-
-    // Create approval
-    await this.prisma.decisionApprovals.create({
-      data: {
-        decisionId: id,
-        approverId: userId,
-        isApproved: true,
-        selectedOptionId: data.selectedOptionId,
-        notes: data.notes,
-      },
-    });
-
-    // Check if decision should be approved
-    const approvalCount = decision.approvals.filter((a) => a.isApproved).length + 1;
-
-    if (approvalCount >= decision.requiredApprovers) {
-      // Approve decision
-      const [updated] = await this.prisma.$transaction([
-        this.prisma.decisions.update({
-          where: { id },
-          data: {
-            status: DecisionStatus.APPROVED,
-            decidedAt: new Date(),
-          },
-        }),
-        this.prisma.decisionStatusHistory.create({
-          data: {
-            decisionId: id,
-            fromStatus: DecisionStatus.PENDING,
-            toStatus: DecisionStatus.APPROVED,
-            changedBy: userId,
-          },
-        }),
-      ]);
-
-      // Remove DECISION blocks
-      await this.prisma.taskBlocks.updateMany({
-        where: {
-          refEntityType: 'DECISION',
-          refEntityId: id,
-          isActive: true,
-        },
-        data: {
-          isActive: false,
-          resolvedAt: new Date(),
-          resolvedBy: userId,
+      await this.activityLogsService.log({
+        project_id: decision.project_id,
+        entity_type: 'TASK',
+        entity_id: decision.related_id,
+        action: 'BLOCKED',
+        user_id: userId,
+        details: {
+          block_type: 'DECISION',
+          decision_id: id,
+          subject: decision.subject,
         },
       });
-
-      return updated;
     }
 
-    return this.findOne(id, tenantId);
-  }
-
-  async reject(
-    id: string,
-    notes: string,
-    userId: string,
-    tenantId: string,
-  ) {
-    // Verify decision
-    const decision = await this.prisma.decisions.findFirst({
-      where: {
-        id,
-        project: { tenantId, deletedAt: null },
-        deletedAt: null,
-      },
+    await this.activityLogsService.log({
+      project_id: decision.project_id,
+      entity_type: 'DECISION',
+      entity_id: id,
+      action: 'SUBMITTED',
+      user_id: userId,
+      details: {},
     });
-
-    if (!decision) {
-      throw new AppError(
-        ErrorCode.RESOURCE_NOT_FOUND,
-        'Decision not found',
-        404,
-      );
-    }
-
-    if (decision.status !== DecisionStatus.PENDING) {
-      throw new AppError(
-        ErrorCode.DECISION_INVALID_STATE,
-        'Can only reject PENDING decisions',
-        400,
-      );
-    }
-
-    // Create rejection
-    await this.prisma.decisionApprovals.create({
-      data: {
-        decisionId: id,
-        approverId: userId,
-        isApproved: false,
-        notes,
-      },
-    });
-
-    // Reject decision
-    const [updated] = await this.prisma.$transaction([
-      this.prisma.decisions.update({
-        where: { id },
-        data: {
-          status: DecisionStatus.REJECTED,
-          decidedAt: new Date(),
-        },
-      }),
-      this.prisma.decisionStatusHistory.create({
-        data: {
-          decisionId: id,
-          fromStatus: DecisionStatus.PENDING,
-          toStatus: DecisionStatus.REJECTED,
-          changedBy: userId,
-          reason: notes,
-        },
-      }),
-    ]);
 
     return updated;
   }
 
-  async getApprovals(id: string, tenantId: string) {
-    // Verify decision
-    const decision = await this.prisma.decisions.findFirst({
-      where: {
-        id,
-        project: { tenantId, deletedAt: null },
-        deletedAt: null,
-      },
+  /**
+   * Cast approval/rejection and auto-approve/reject decision
+   */
+  async castApproval(
+    id: string,
+    approverId: string,
+    dto: CastApprovalDto,
+    userId: string,
+  ): Promise<Decision> {
+    const decision = await this.findOne(id);
+
+    // Find approval record
+    const approval = await this.decisionApprovalsRepository.findOne({
+      where: { decision_id: id, approver_id: approverId },
     });
 
-    if (!decision) {
-      throw new AppError(
-        ErrorCode.RESOURCE_NOT_FOUND,
-        'Decision not found',
-        404,
-      );
+    if (!approval) {
+      throw new NotFoundException('Approval not found for this approver');
     }
 
-    return this.prisma.decisionApprovals.findMany({
-      where: { decisionId: id },
-      include: {
-        approver: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
-          },
-        },
-        selectedOption: true,
-      },
-      orderBy: {
-        approvedAt: 'desc',
+    // Update approval
+    approval.approved = dto.approved;
+    approval.comment = dto.comment;
+    approval.decided_at = new Date();
+    await this.decisionApprovalsRepository.save(approval);
+
+    await this.activityLogsService.log({
+      project_id: decision.project_id,
+      entity_type: 'DECISION',
+      entity_id: id,
+      action: 'APPROVAL_CAST',
+      user_id: userId,
+      details: {
+        approver_id: approverId,
+        approved: dto.approved,
+        comment: dto.comment,
       },
     });
+
+    // Recompute decision status
+    return this.recomputeDecisionStatus(decision, userId);
   }
 
-  async getStatusHistory(id: string, tenantId: string) {
-    // Verify decision
-    const decision = await this.prisma.decisions.findFirst({
-      where: {
-        id,
-        project: { tenantId, deletedAt: null },
-        deletedAt: null,
-      },
+  /**
+   * Recompute decision status based on approvals
+   */
+  private async recomputeDecisionStatus(
+    decision: Decision,
+    userId: string,
+  ): Promise<Decision> {
+    const approvals = await this.decisionApprovalsRepository.find({
+      where: { decision_id: decision.id },
     });
 
-    if (!decision) {
-      throw new AppError(
-        ErrorCode.RESOURCE_NOT_FOUND,
-        'Decision not found',
-        404,
-      );
+    const allApproved = approvals.every((a) => a.approved === true);
+    const anyRejected = approvals.some((a) => a.approved === false);
+    const previousStatus = decision.status;
+
+    if (anyRejected) {
+      decision.status = DecisionStatus.REJECTED;
+      decision.updated_by = userId;
+      await this.decisionsRepository.save(decision);
+
+      // INV-9: Disable task block when rejected (decision is made)
+      if (decision.blocks_work && decision.related_type === 'TASK') {
+        await this.taskBlocksService.disableByReference(
+          EntityType.DECISION,
+          decision.id,
+        );
+
+        await this.activityLogsService.log({
+          project_id: decision.project_id,
+          entity_type: 'TASK',
+          entity_id: decision.related_id,
+          action: 'UNBLOCKED',
+          user_id: userId,
+          details: {
+            block_type: 'DECISION',
+            decision_id: decision.id,
+            reason: 'Decision rejected',
+          },
+        });
+      }
+
+      await this.activityLogsService.log({
+        project_id: decision.project_id,
+        entity_type: 'DECISION',
+        entity_id: decision.id,
+        action: 'REJECTED',
+        user_id: userId,
+        details: {},
+      });
+    } else if (allApproved) {
+      decision.status = DecisionStatus.APPROVED;
+      decision.updated_by = userId;
+      await this.decisionsRepository.save(decision);
+
+      // INV-9: Disable task block when approved
+      if (decision.blocks_work && decision.related_type === 'TASK') {
+        await this.taskBlocksService.disableByReference(
+          EntityType.DECISION,
+          decision.id,
+        );
+
+        await this.activityLogsService.log({
+          project_id: decision.project_id,
+          entity_type: 'TASK',
+          entity_id: decision.related_id,
+          action: 'UNBLOCKED',
+          user_id: userId,
+          details: {
+            block_type: 'DECISION',
+            decision_id: decision.id,
+            reason: 'Decision approved',
+          },
+        });
+      }
+
+      await this.activityLogsService.log({
+        project_id: decision.project_id,
+        entity_type: 'DECISION',
+        entity_id: decision.id,
+        action: 'APPROVED',
+        user_id: userId,
+        details: {},
+      });
     }
 
-    return this.prisma.decisionStatusHistory.findMany({
-      where: { decisionId: id },
-      include: {
-        changedByUser: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
-          },
-        },
-      },
-      orderBy: {
-        changedAt: 'desc',
-      },
+    return decision;
+  }
+
+  async delete(id: string, userId: string): Promise<void> {
+    const decision = await this.findOne(id);
+
+    // Disable any related task blocks
+    if (decision.blocks_work && decision.related_type === 'TASK') {
+      await this.taskBlocksService.disableByReference(EntityType.DECISION, id);
+    }
+
+    await this.activityLogsService.log({
+      project_id: decision.project_id,
+      entity_type: 'DECISION',
+      entity_id: id,
+      action: 'DELETED',
+      user_id: userId,
+      details: { subject: decision.subject },
     });
+
+    await this.decisionsRepository.remove(decision);
   }
 }

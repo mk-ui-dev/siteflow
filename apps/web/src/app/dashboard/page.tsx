@@ -1,9 +1,43 @@
 'use client';
 
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { CheckSquare, ClipboardCheck, AlertCircle, Package } from 'lucide-react';
+import { useDashboardStats } from '@/hooks/use-reports';
+import { CheckSquare, ClipboardCheck, AlertCircle, Package, Loader2 } from 'lucide-react';
+
+const PROJECT_ID = 'proj-demo-123';
 
 export default function DashboardPage() {
+  const { data: stats, isLoading, error } = useDashboardStats(PROJECT_ID);
+
+  if (error) {
+    return (
+      <div className="space-y-6">
+        <div>
+          <h1 className="text-3xl font-bold">Dashboard</h1>
+          <p className="text-gray-500">Overview of your construction projects</p>
+        </div>
+        <Card>
+          <CardContent className="p-6">
+            <p className="text-sm text-red-500">
+              Error loading dashboard. Please make sure the API is running.
+            </p>
+            <p className="mt-2 text-xs text-muted-foreground">
+              Expected API URL: {process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000/api'}
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  if (isLoading) {
+    return (
+      <div className="flex h-[50vh] items-center justify-center">
+        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       <div>
@@ -18,8 +52,10 @@ export default function DashboardPage() {
             <CheckSquare className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">245</div>
-            <p className="text-xs text-muted-foreground">+12% from last month</p>
+            <div className="text-2xl font-bold">{stats?.tasks?.total || 0}</div>
+            <p className="text-xs text-muted-foreground">
+              {stats?.tasks?.inProgress || 0} in progress
+            </p>
           </CardContent>
         </Card>
 
@@ -29,8 +65,10 @@ export default function DashboardPage() {
             <ClipboardCheck className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">48</div>
-            <p className="text-xs text-muted-foreground">5 pending</p>
+            <div className="text-2xl font-bold">{stats?.inspections?.total || 0}</div>
+            <p className="text-xs text-muted-foreground">
+              {stats?.inspections?.pending || 0} pending
+            </p>
           </CardContent>
         </Card>
 
@@ -40,8 +78,10 @@ export default function DashboardPage() {
             <AlertCircle className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">12</div>
-            <p className="text-xs text-muted-foreground">3 critical</p>
+            <div className="text-2xl font-bold">{stats?.issues?.open || 0}</div>
+            <p className="text-xs text-muted-foreground">
+              {stats?.issues?.critical || 0} critical
+            </p>
           </CardContent>
         </Card>
 
@@ -51,22 +91,50 @@ export default function DashboardPage() {
             <Package className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">18</div>
-            <p className="text-xs text-muted-foreground">2 in transit</p>
+            <div className="text-2xl font-bold">{stats?.deliveries?.total || 0}</div>
+            <p className="text-xs text-muted-foreground">
+              {stats?.deliveries?.pending || 0} pending
+            </p>
           </CardContent>
         </Card>
       </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Recent Activity</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <p className="text-sm text-muted-foreground">
-            Connect to real data to see recent activity
-          </p>
-        </CardContent>
-      </Card>
+      <div className="grid gap-4 md:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <CardTitle>Project Health</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {stats?.health ? (
+              <div className="space-y-2">
+                <div className="flex justify-between text-sm">
+                  <span>Overall Score</span>
+                  <span className="font-medium">{stats.health.score}%</span>
+                </div>
+                <div className="h-2 w-full rounded-full bg-gray-200">
+                  <div
+                    className="h-2 rounded-full bg-primary"
+                    style={{ width: `${stats.health.score}%` }}
+                  />
+                </div>
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground">No health data available</p>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Recent Activity</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-sm text-muted-foreground">
+              {stats?.recentActivity?.length || 0} recent activities
+            </p>
+          </CardContent>
+        </Card>
+      </div>
     </div>
   );
 }

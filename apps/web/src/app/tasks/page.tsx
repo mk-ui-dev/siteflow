@@ -6,11 +6,11 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { DataTable } from '@/components/data-table';
+import { CreateTaskModal } from '@/components/modals/create-task-modal';
 import { useTasks, useStartTask, useCompleteTask } from '@/hooks/use-tasks';
 import { Plus, Play, CheckCircle, Loader2 } from 'lucide-react';
 import { formatDate } from '@/lib/utils';
 
-// Mock project ID - in real app, get from route/context
 const PROJECT_ID = 'proj-demo-123';
 
 interface Task {
@@ -36,6 +36,7 @@ const priorityColors: Record<string, 'default' | 'secondary' | 'warning' | 'dest
 };
 
 export default function TasksPage() {
+  const [createModalOpen, setCreateModalOpen] = useState(false);
   const { data: tasks, isLoading, error } = useTasks(PROJECT_ID);
   const startTask = useStartTask();
   const completeTask = useCompleteTask();
@@ -168,32 +169,40 @@ export default function TasksPage() {
   }
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold">Tasks</h1>
-          <p className="text-gray-500">Manage your construction tasks</p>
+    <>
+      <div className="space-y-6">
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-3xl font-bold">Tasks</h1>
+            <p className="text-gray-500">Manage your construction tasks</p>
+          </div>
+          <Button onClick={() => setCreateModalOpen(true)}>
+            <Plus className="mr-2 h-4 w-4" />
+            New Task
+          </Button>
         </div>
-        <Button>
-          <Plus className="mr-2 h-4 w-4" />
-          New Task
-        </Button>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Task List</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {isLoading ? (
+              <div className="flex h-24 items-center justify-center">
+                <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+              </div>
+            ) : (
+              <DataTable columns={columns} data={tasks || []} />
+            )}
+          </CardContent>
+        </Card>
       </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Task List</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {isLoading ? (
-            <div className="flex h-24 items-center justify-center">
-              <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-            </div>
-          ) : (
-            <DataTable columns={columns} data={tasks || []} />
-          )}
-        </CardContent>
-      </Card>
-    </div>
+      <CreateTaskModal
+        open={createModalOpen}
+        onOpenChange={setCreateModalOpen}
+        projectId={PROJECT_ID}
+      />
+    </>
   );
 }

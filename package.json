@@ -1,0 +1,44 @@
+{
+  "name": "siteflow",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SiteFlow (BuildOps Lite) - Self-hosted construction operations management system",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mk-ui-dev/siteflow.git"
+  },
+  "license": "MIT",
+  "author": "mk-ui-dev",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"pnpm --filter api dev\" \"pnpm --filter worker dev\" \"pnpm --filter web dev\"",
+    "build": "pnpm --filter shared build && pnpm --filter ui build && pnpm --filter api build && pnpm --filter worker build && pnpm --filter web build",
+    "test": "pnpm --filter api test && pnpm --filter worker test",
+    "lint": "eslint . --ext .ts,.tsx",
+    "format": "prettier --write \"**/*.{ts,tsx,json,md}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,json,md}\"",
+    "typecheck": "tsc --noEmit",
+    "clean": "pnpm --parallel --filter ./apps/* --filter ./packages/* run clean",
+    "migrate": "pnpm --filter api migrate",
+    "seed": "pnpm --filter api seed"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.5",
+    "@typescript-eslint/eslint-plugin": "^6.19.0",
+    "@typescript-eslint/parser": "^6.19.0",
+    "concurrently": "^8.2.2",
+    "eslint": "^8.56.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-import": "^2.29.1",
+    "prettier": "^3.2.4",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=8.0.0"
+  },
+  "packageManager": "pnpm@8.15.1"
+}

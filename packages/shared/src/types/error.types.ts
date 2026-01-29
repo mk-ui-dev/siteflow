@@ -1,0 +1,32 @@
+export enum ErrorCode {
+  // General
+  INTERNAL_ERROR = 'INTERNAL_ERROR',
+  VALIDATION_ERROR = 'VALIDATION_ERROR',
+  UNAUTHORIZED = 'UNAUTHORIZED',
+  PERMISSION_DENIED = 'PERMISSION_DENIED',
+  RESOURCE_NOT_FOUND = 'RESOURCE_NOT_FOUND',
+  RESOURCE_ALREADY_EXISTS = 'RESOURCE_ALREADY_EXISTS',
+
+  // Task specific
+  TASK_BLOCKED = 'TASK_BLOCKED',
+  TASK_INVALID_STATE = 'TASK_INVALID_STATE',
+  TASK_MISSING_ASSIGNEES = 'TASK_MISSING_ASSIGNEES',
+  TASK_REQUIRES_INSPECTION = 'TASK_REQUIRES_INSPECTION',
+
+  // Inspection specific
+  INSPECTION_INVALID_STATE = 'INSPECTION_INVALID_STATE',
+  INSPECTION_INCOMPLETE_CHECKLIST = 'INSPECTION_INCOMPLETE_CHECKLIST', // INV-5
+  INSPECTION_MISSING_PHOTOS = 'INSPECTION_MISSING_PHOTOS', // INV-4
+}
+
+export class AppError extends Error {
+  constructor(
+    public code: ErrorCode,
+    message: string,
+    public statusCode: number = 500,
+    public details?: any,
+  ) {
+    super(message);
+    this.name = 'AppError';
+  }
+}

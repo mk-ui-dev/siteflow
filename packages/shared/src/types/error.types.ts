@@ -20,6 +20,13 @@ export enum ErrorCode {
 
   // Issue specific
   ISSUE_INVALID_STATE = 'ISSUE_INVALID_STATE',
+
+  // Delivery specific
+  DELIVERY_INVALID_STATE = 'DELIVERY_INVALID_STATE',
+
+  // Decision specific
+  DECISION_INVALID_STATE = 'DECISION_INVALID_STATE',
+  DECISION_ALREADY_APPROVED = 'DECISION_ALREADY_APPROVED',
 }
 
 export class AppError extends Error {

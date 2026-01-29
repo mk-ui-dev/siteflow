@@ -8,5 +8,6 @@ export * from './delivery.types';
 export * from './decision.types';
 export * from './file.types';
 export * from './report.types';
+export * from './notification.types';
 export * from './error.types';
 export * from './permissions';
